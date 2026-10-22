@@ -1,0 +1,106 @@
+=================================================================
+ MiniPTX DGX Execution & Benchmark Log (Sanitized)
+ Target: NVIDIA Tesla V100-SXM2-32GB (sm_70)
+ Driver: 525.60.13 | CUDA Toolkit: 12.0
+ Host: <dgx-host> (<dgx-ip>)
+=================================================================
+
+--- Part 1: CUDA Environment & GPU Detection ---
+Detected CUDA Toolkit Version: 12.0
+Driver Version: 525.60.13
+GPU Devices Detected (8x Tesla V100-SXM2):
+  GPU 0: Tesla V100-SXM2-32GB, 525.60.13, Compute Capability 7.0
+  GPU 1: Tesla V100-SXM2-32GB, 525.60.13, Compute Capability 7.0
+  GPU 2: Tesla V100-SXM2-32GB, 525.60.13, Compute Capability 7.0
+  GPU 3: Tesla V100-SXM2-32GB, 525.60.13, Compute Capability 7.0
+  GPU 4: Tesla V100-SXM2-32GB, 525.60.13, Compute Capability 7.0
+  GPU 5: Tesla V100-SXM2-32GB, 525.60.13, Compute Capability 7.0
+  GPU 6: Tesla V100-SXM2-32GB, 525.60.13, Compute Capability 7.0
+  GPU 7: Tesla V100-SXM2-32GB, 525.60.13, Compute Capability 7.0
+
+--- Part 2: GPU Functional Correctness Suite (Phase 3 & 4a) ---
+Executed via: bash scripts/run_dgx.sh
+Assembly with ptxas:
+  - ptxas accepted all 5 kernels without error
+Execution on Tesla V100 via CUDA Driver API:
+  - Test 1 (vector add):       [PASS]
+  - Test 2 (saxpy):            [PASS]
+  - Test 3 (scale):            [PASS]
+  - Test 4 (element-wise max): [PASS]
+  - Test 5 (loop):             [PASS]
+  Total: 5/5 GPU tests passed on Tesla V100 (sm_70).
+
+Cubin Debug Sections (DWARF lineinfo verification):
+  - .debug_line section verified in cubin
+  - .nv_debug_line_sass section verified in cubin
+
+--- Part 3: Micro-Benchmark Suite (Run 3 Complete Verified Diagnostics) ---
+Executed via: bash scripts/benchmark_dgx.sh
+Target: GPU 0 (Tesla V100-SXM2-32GB, shared cluster environment)
+Workloads: N = 2^24 elements (16,777,216 floats)
+Harness: Pure CUDA Driver API (cuEvent* hardware timing), alternating timed runs
+
+Benchmark 1: SAXPY (Memory-Bound)
+  - PTX Instruction Counts:
+      MiniPTX:                           36 instructions
+      CUDA (nvcc -O3):                   20 instructions
+  - SASS Instruction Counts:
+      MiniPTX:                           24 SASS instructions
+      CUDA (nvcc -O3):                   16 SASS instructions
+  - Measured Runtime (Median):
+      MiniPTX:                           0.2570 ms
+      CUDA (nvcc -O3):                   0.2570 ms
+  - Effective Bandwidth:
+      MiniPTX:                           783.2988 GB/s
+      CUDA (nvcc -O3):                   783.2988 GB/s
+  - Measured Ratio:
+      MiniPTX / CUDA:                    1.000x
+
+Benchmark 2: Compute-Heavy (N = 2^24 elements, 64-iteration inner loop)
+  - PTX Instruction Counts:
+      MiniPTX:                           54 instructions
+      CUDA (nvcc -O3):                   28 instructions
+      CUDA no-FMA (nvcc --fmad=false):   29 instructions
+  - Measured Runtime (Median):
+      MiniPTX:                           0.4874 ms (4405.8 GFLOPS)
+      CUDA (nvcc -O3):                   0.4342 ms (4946.1 GFLOPS)
+      CUDA no-FMA (nvcc --fmad=false):   0.4884 ms (4396.5 GFLOPS)
+  - Measured Ratios:
+      MiniPTX / CUDA (nvcc -O3):         1.123x (12.26% slower)
+      MiniPTX / CUDA no-FMA:             0.998x (0.21% diff, exact match within noise)
+      CUDA (nvcc -O3) vs CUDA no-FMA:    0.889x (11.11% speedup from hardware FMA fusion)
+
+SASS Machine Instruction & Opcode Breakdown (Compute-Heavy):
+  - MiniPTX (emitted PTX):
+      Total SASS instructions:           24
+      Opcode breakdown:                  FFMA: 0 | FMUL: 1 | FADD: 1
+      Loop structure:                    Rolled loop (unroll factor 1: 2 float ops in body, 1 branch)
+  - CUDA (nvcc -O3):
+      Total SASS instructions:           32
+      Opcode breakdown:                  FFMA: 1 | FMUL: 0 | FADD: 0
+      Loop structure:                    Rolled loop (unroll factor 1: 1 float op in body, 1 branch)
+  - CUDA no-FMA (nvcc --fmad=false):
+      Total SASS instructions:           32
+      Opcode breakdown:                  FFMA: 0 | FMUL: 1 | FADD: 1
+      Loop structure:                    Rolled loop (unroll factor 1: 2 float ops in body, 1 branch)
+
+Multi-Run Measurement Stability (Shared DGX Cluster):
+  Run 1: MiniPTX 0.4721 ms vs CUDA -O3 0.4209 ms -> Ratio: 1.122x
+  Run 2: MiniPTX 0.4424 ms vs CUDA -O3 0.3948 ms -> Ratio: 1.121x
+  Run 3: MiniPTX 0.4874 ms vs CUDA -O3 0.4342 ms -> Ratio: 1.123x
+
+Empirical Conclusions:
+  1. Hardware FMA Fusion Root Cause:
+     MiniPTX generates explicit mul.rn.f32 and add.rn.f32 (two dependent instructions:
+     FMUL followed by FADD). nvcc -O3 contracts these by default into a single FFMA.
+     When nvcc is compiled with --fmad=false, it also emits FMUL + FADD and its runtime
+     matches MiniPTX within measurement noise (0.4874 ms vs 0.4884 ms, 0.998x).
+     FMA contraction alone provides an 11.11% speedup, accounting for the entire gap.
+  2. Loop Unrolling Ruled Out:
+     All three kernels preserve a rolled loop with 1 backward branch and a single arithmetic
+     sequence in the loop body. This rules out unrolling differences as a factor. (Note:
+     the rolled/unrolled check is a heuristic based on instruction and branch counts).
+  3. Static SASS Count Does Not Predict Performance:
+     MiniPTX has 24 SASS instructions while no-FMA CUDA has 32, yet both achieve identical
+     runtime (~0.487 ms - 0.488 ms). Static instruction counts do not correlate with runtime
+     when loops dictate dynamic execution cycles.
